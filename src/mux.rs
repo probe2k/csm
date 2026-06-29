@@ -69,6 +69,11 @@ pub struct Mux {
     /// Last rendered screen of the active session, for diff-based compositing
     /// (only used when the status bar is on).
     last_screen: Option<vt100::Screen>,
+    /// Incremental token/cost tracker for the active session. Rebuilt on each
+    /// switch, then polled (throttled) as the session emits output.
+    usage: Option<sessions::UsageTracker>,
+    /// Last time we polled the transcript for new usage, to throttle re-reads.
+    last_poll: std::time::Instant,
 }
 
 /// Entry point: set up the terminal, spawn the first session, run the loop.
@@ -106,6 +111,8 @@ pub fn run(
         accent: crate::config::status_accent(),
         status_right: crate::config::status_right(&dir_base),
         last_screen: None,
+        usage: None,
+        last_poll: std::time::Instant::now(),
     };
 
     match initial {
@@ -143,6 +150,8 @@ impl Mux {
                             // Composite from the vt100 grid so the bar's row is
                             // never scrolled over.
                             self.paint_content();
+                            // Live-refresh the usage readout as the session grows.
+                            self.maybe_poll_usage();
                         } else {
                             // Status bar off: original raw passthrough (exact
                             // fidelity, full height).
@@ -290,6 +299,7 @@ impl Mux {
     fn render_active(&mut self) {
         if self.status {
             self.refresh_title(self.active);
+            self.refresh_usage(self.active);
             self.last_screen = None;
             self.paint_content(); // full, because last_screen was reset
             self.paint_status();
@@ -357,7 +367,13 @@ impl Mux {
                 active: i == self.active,
             })
             .collect();
-        let bar = crate::status::render(self.cols, &tabs, &self.status_right, self.accent);
+        let bar = crate::status::render(
+            self.cols,
+            &tabs,
+            &self.status_right,
+            self.accent,
+            self.usage.as_ref().and_then(|t| t.usage()),
+        );
         let mut out = io::stdout().lock();
         // Save cursor+attrs, disable autowrap, draw on the last row, restore.
         let _ = write!(out, "\x1b7\x1b[{};1H\x1b[?7l{bar}\x1b[?7h\x1b8", self.rows);
@@ -374,6 +390,34 @@ impl Mux {
             let t = title_of(m);
             if let Some(s) = self.sessions.get_mut(idx) {
                 s.title = t;
+            }
+        }
+    }
+
+    /// Recompute the active session's token/cost usage from its transcript so
+    /// the status bar reflects whichever session was just switched to.
+    fn refresh_usage(&mut self, idx: usize) {
+        let id = match self.sessions.get(idx) {
+            Some(s) => s.id.clone(),
+            None => return,
+        };
+        self.usage = Some(sessions::UsageTracker::new(&self.target, &id));
+        self.last_poll = std::time::Instant::now();
+    }
+
+    /// While the active session streams output, fold any new transcript lines
+    /// into its usage and repaint the bar if the totals moved. Throttled so a
+    /// burst of output triggers at most one transcript read per interval; a
+    /// length check makes the no-new-data case nearly free.
+    fn maybe_poll_usage(&mut self) {
+        let now = std::time::Instant::now();
+        if now.duration_since(self.last_poll) < std::time::Duration::from_millis(750) {
+            return;
+        }
+        self.last_poll = now;
+        if let Some(t) = self.usage.as_mut() {
+            if t.poll() {
+                self.paint_status();
             }
         }
     }

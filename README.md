@@ -50,15 +50,46 @@ it's in the background).
 
 Like tmux, csm draws a status bar on the bottom row showing a `csm` block, one
 tab per live session (`N:title`, the active one highlighted in the accent color),
-and a right-hand segment (the directory name by default):
+a **per-session usage readout**, and a right-hand segment (the directory name by
+default):
 
 ```
- csm  0:fix auth bug  1:refactor parser                                   api
+ csm  0:fix auth bug  1:refactor parser     󰍛 Opus 4.8  8.3k  6.5k 󰆼 435k  $4.62  api
 ```
 
 The session numbers map directly to the `<prefix> 0`–`9` jump keys. csm reserves
 that bottom row and runs claude in the rows above it (exactly how tmux reserves
 its status line), compositing claude's screen so it can never scroll over the bar.
+
+### Session usage
+
+The readout always reflects the **active** session, so it changes the moment you
+switch, and it keeps ticking up live as the session runs. Each metric has its own
+[Nerd Font](https://www.nerdfonts.com/) glyph and color:
+
+| Glyph | Metric |
+|-------|--------|
+| 󰍛 | Model (e.g. `Opus 4.8`) |
+|  | Input tokens |
+|  | Output tokens |
+| 󰆼 | Cache tokens (read + creation) |
+| `$` | Estimated cost |
+
+Token counts are summed straight from claude's transcript. **Cost is an
+estimate** — claude's transcripts record token counts but not a price, so csm
+computes it from a built-in per-model rate table (Opus / Sonnet / Haiku tiers,
+including the separate cache-write rates); unknown models fall back to
+Sonnet-tier pricing. On a narrow terminal the whole readout is dropped rather
+than shrinking the bar below its true width.
+
+> The glyphs need a Nerd Font installed and selected in your terminal. Without
+> one they show as tofu boxes — everything else still works; use `CSM_STATUS=off`
+> if you'd rather hide the bar entirely.
+
+Live updates are cheap: csm reads only the bytes appended to the transcript since
+it last looked (never re-parsing the whole file), at most a few times a second
+and only while the session is actually producing output — an idle session costs
+nothing.
 
 Customize it with env vars:
 
@@ -118,8 +149,8 @@ so its old sessions stay hidden and you start fresh — automatically.
   `~/.claude/projects/<encoded-path>/<uuid>.jsonl` (honors `CLAUDE_CONFIG_DIR`).
   `csm` keeps one small embedded database, `~/.claude/csm/index.redb`
   ([redb](https://crates.io/crates/redb)), mapping each directory fingerprint to
-  its session ids. Titles/timestamps are read live from the transcripts, never
-  duplicated. Each update is an atomic, crash-safe transaction, and because csm
+  its session ids. Titles, timestamps, and token/cost usage are read live from
+  the transcripts, never duplicated. Each update is an atomic, crash-safe transaction, and because csm
   is multi-process (one per terminal), the DB is opened only transiently per
   operation — so several csm instances running at once serialize their writes
   instead of clobbering each other.

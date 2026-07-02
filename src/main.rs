@@ -166,7 +166,10 @@ fn global_list() -> std::io::Result<()> {
 ///
 /// - Known fingerprint -> its bound sessions.
 /// - Never-managed path with transcripts on disk -> adopt them (one-time
-///   bootstrap for pre-existing projects).
+///   bootstrap for pre-existing projects), but only transcripts at least as
+///   new as the directory itself: an older one belongs to a previous folder
+///   that lived at this path, even if the index was wiped and can no longer
+///   say so via `path_seen_before`.
 /// - Otherwise (path managed under a different inode = recreated folder, or
 ///   truly empty) -> nothing, so we start fresh and old sessions stay hidden.
 fn sessions_for_current(index: &Index, fp: &str, target: &str) -> Vec<SessionMeta> {
@@ -175,7 +178,11 @@ fn sessions_for_current(index: &Index, fp: &str, target: &str) -> Vec<SessionMet
         return sessions::list_bound(target, &bound);
     }
     if !index.path_seen_before(target) {
-        let disk = sessions::list_on_disk(target);
+        let born = std::fs::metadata(target).and_then(|m| m.created()).ok();
+        let disk: Vec<SessionMeta> = sessions::list_on_disk(target)
+            .into_iter()
+            .filter(|s| born.is_none_or(|b| s.mtime >= b))
+            .collect();
         if !disk.is_empty() {
             let ids: Vec<String> = disk.iter().map(|s| s.id.clone()).collect();
             let _ = index.set_sessions(fp, target, ids.clone());

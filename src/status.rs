@@ -136,7 +136,9 @@ fn build_usage(u: &SessionUsage) -> (String, usize) {
         (C_IN, format!("\u{f063} {}", fmt_count(u.input))), //  arrow-down — input tokens
         (C_OUT, format!("\u{f062} {}", fmt_count(u.output))), //  arrow-up — output tokens
         (C_CACHE, format!("\u{f1c0} {}", fmt_count(cache))), //  database — cache tokens
-        (C_COST, format!("\u{f155} {}", fmt_cost(u.cost_usd))), //  dollar — estimated cost
+        // f0d6 (money bill) instead of f155 (dollar): f155 overdraws its cell
+        // in Nerd Fonts and gets clipped.
+        (C_COST, format!("\u{f0d6} {}", fmt_cost(u.cost_usd))), //  money — estimated cost
     ];
     let mut s = String::new();
     let mut vis = 0;
@@ -207,7 +209,7 @@ mod tests {
         let bar = render(200, &[], "csm", 39, Some(&u));
         // Glyphs present.
         assert!(bar.contains('\u{f2db}')); // model
-        assert!(bar.contains('\u{f155}')); // cost
+        assert!(bar.contains('\u{f0d6}')); // cost
                                            // Values present.
         assert!(bar.contains("Opus 4.8"));
         assert!(bar.contains("$4.62"));

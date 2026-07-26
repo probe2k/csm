@@ -19,7 +19,7 @@ use std::time::Duration;
 use redb::{Database, DatabaseError, ReadableTable, TableDefinition, TableError};
 use serde::{Deserialize, Serialize};
 
-use crate::config::index_path;
+use crate::config::{index_path, legacy_index_path};
 
 const TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("fingerprints");
 
@@ -40,15 +40,24 @@ pub struct Index {
 
 impl Index {
     pub fn load() -> Index {
-        Index {
-            path: index_path(),
-        }
+        let path = index_path();
+        migrate_legacy(&path);
+        Index { path }
     }
 
     // ---- reads (best-effort: errors degrade to "empty") --------------------
 
     pub fn bound_ids(&self, fp: &str) -> Vec<String> {
-        self.get(fp).map(|e| e.sessions).unwrap_or_default()
+        self.bound_ids_checked(fp).unwrap_or_default()
+    }
+
+    /// Same as `bound_ids`, but surfaces read failures instead of masking them
+    /// as "no sessions". Callers that decide whether to *write* based on this
+    /// (e.g. the on-disk-adoption fallback) must use this form — otherwise a
+    /// transient lock/I/O error looks identical to "never managed" and can
+    /// trigger an overwrite of real data.
+    pub fn bound_ids_checked(&self, fp: &str) -> io::Result<Vec<String>> {
+        Ok(self.get(fp)?.map(|e| e.sessions).unwrap_or_default())
     }
 
     /// True if any fingerprint already maps to this path (i.e. csm has managed
@@ -65,8 +74,12 @@ impl Index {
     // ---- writes (atomic single transactions) -------------------------------
 
     /// Bind a session id under a fingerprint, recording/refreshing the path.
+    ///
+    /// Propagates read failures instead of defaulting to an empty entry: a
+    /// transient error here must never look like "no prior sessions", or a
+    /// retry would overwrite (and lose) whatever was already bound.
     pub fn bind(&self, fp: &str, path: &str, session_id: &str) -> io::Result<()> {
-        let mut entry = self.get(fp).unwrap_or_default();
+        let mut entry = self.get(fp)?.unwrap_or_default();
         entry.path = path.to_string();
         if !entry.sessions.iter().any(|s| s == session_id) {
             entry.sessions.push(session_id.to_string());
@@ -88,7 +101,7 @@ impl Index {
     /// Remove a single session id from a fingerprint's bound list.
     #[allow(dead_code)]
     pub fn unbind(&self, fp: &str, session_id: &str) -> io::Result<()> {
-        if let Some(mut entry) = self.get(fp) {
+        if let Some(mut entry) = self.get(fp)? {
             entry.sessions.retain(|s| s != session_id);
             self.put(fp, &entry)?;
         }
@@ -97,16 +110,24 @@ impl Index {
 
     // ---- low-level db access ------------------------------------------------
 
-    fn get(&self, fp: &str) -> Option<Entry> {
-        let db = self.open().ok()?;
-        let rtx = db.begin_read().ok()?;
+    /// `Ok(None)` means the fingerprint is genuinely unbound. Any other
+    /// failure (lock contention, I/O, decode error) is an `Err`, kept
+    /// distinct so read-modify-write callers don't mistake "couldn't read"
+    /// for "nothing there" and clobber existing data.
+    fn get(&self, fp: &str) -> io::Result<Option<Entry>> {
+        let db = self.open()?;
+        let rtx = db.begin_read().map_err(ioerr)?;
         let table = match rtx.open_table(TABLE) {
             Ok(t) => t,
-            Err(TableError::TableDoesNotExist(_)) => return None,
-            Err(_) => return None,
+            Err(TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(ioerr(e)),
         };
-        let guard = table.get(fp).ok()??;
-        bincode::deserialize(guard.value()).ok()
+        match table.get(fp).map_err(ioerr)? {
+            Some(guard) => bincode::deserialize(guard.value())
+                .map(Some)
+                .map_err(|e| io::Error::other(format!("index decode: {e}"))),
+            None => Ok(None),
+        }
     }
 
     fn try_entries(&self) -> io::Result<Vec<Entry>> {
@@ -163,4 +184,25 @@ impl Index {
 
 fn ioerr<E: std::fmt::Display>(e: E) -> io::Error {
     io::Error::other(format!("index db: {e}"))
+}
+
+/// One-time move from the old location (inside claude's own `~/.claude/csm/`)
+/// to the new one. Best-effort: if it fails, csm just starts a fresh index
+/// rather than erroring out.
+fn migrate_legacy(new_path: &PathBuf) {
+    if new_path.exists() {
+        return;
+    }
+    let legacy = legacy_index_path();
+    if !legacy.exists() {
+        return;
+    }
+    if let Some(parent) = new_path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    if std::fs::rename(&legacy, new_path).is_err() {
+        let _ = std::fs::copy(&legacy, new_path).map(|_| std::fs::remove_file(&legacy));
+    }
 }

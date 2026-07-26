@@ -116,7 +116,8 @@ them from your shell profile.
 | `CSM_STATUS_RIGHT` | dir basename | Text for the status bar's right segment. |
 | `CSM_CLAUDE_BIN` | `claude` | Path to the claude binary to launch. |
 | `CSM_BINDIR` | `~/.local/bin` | Install/uninstall target dir (used by the scripts). |
-| `CLAUDE_CONFIG_DIR` | `~/.claude` | Base config dir; csm reads `…/projects/` and writes `…/csm/index.redb`. (Shared with claude.) |
+| `CLAUDE_CONFIG_DIR` | `~/.claude` | Base config dir claude owns; csm only reads `…/projects/` from it. |
+| `XDG_DATA_HOME` | `~/.local/share` | Base data dir csm owns; csm writes `…/csm/index.redb` here. |
 
 ```sh
 # example: green accent, custom prefix, custom right segment
@@ -131,9 +132,13 @@ export CSM_STATUS_RIGHT="$(whoami)@$(hostname -s)"
 `xyz` and later create a new, unrelated `xyz` at the same path, `claude` will
 happily offer the old folder's conversations.
 
-`csm` identifies a directory by its **inode fingerprint** (`device + inode +
-birthtime`), not its name. A recreated folder is a different physical directory,
-so its old sessions stay hidden and you start fresh — automatically.
+`csm` identifies a directory by a **random marker it stamps into an extended
+attribute** the first time it sees that directory, not by its name. Deleting
+the directory destroys the marker along with it, so a recreated folder — even
+one re-extracted from the very same zip, which can restore the original
+creation time and land on a reused inode — always looks brand new, and its old
+sessions stay hidden while you start fresh. (Falls back to a `device + inode +
+birthtime` fingerprint on filesystems where xattrs aren't available.)
 
 ## How it works
 
@@ -147,13 +152,16 @@ so its old sessions stay hidden and you start fresh — automatically.
   model tmux uses.
 - **Identity & state**: `claude` already stores transcripts at
   `~/.claude/projects/<encoded-path>/<uuid>.jsonl` (honors `CLAUDE_CONFIG_DIR`).
-  `csm` keeps one small embedded database, `~/.claude/csm/index.redb`
-  ([redb](https://crates.io/crates/redb)), mapping each directory fingerprint to
-  its session ids. Titles, timestamps, and token/cost usage are read live from
-  the transcripts, never duplicated. Each update is an atomic, crash-safe transaction, and because csm
-  is multi-process (one per terminal), the DB is opened only transiently per
-  operation — so several csm instances running at once serialize their writes
-  instead of clobbering each other.
+  `csm` keeps its own small embedded database, `~/.local/share/csm/index.redb`
+  (honors `XDG_DATA_HOME`) — deliberately outside `~/.claude`, since that tree
+  belongs to claude and csm has no say over its layout — mapping each
+  directory fingerprint to its session ids. Titles, timestamps, and token/cost
+  usage are read live from the transcripts, never duplicated. Each update is
+  an atomic, crash-safe transaction, and because csm is multi-process (one per
+  terminal), the DB is opened only transiently per operation — so several csm
+  instances running at once serialize their writes instead of clobbering each
+  other. (Upgrading from an older csm: the index is migrated automatically
+  from its old `~/.claude/csm/` location the first time you run it.)
 - **Launching**: new sessions use `claude --session-id <uuid>` (so csm knows the
   id up front); resumes use `claude --resume <uuid>`.
 - **Bootstrap**: the first time you point csm at a directory that already has
@@ -199,14 +207,15 @@ untouched):
 
 ```sh
 ./uninstall.sh            # remove the installed csm symlink
-./uninstall.sh --purge    # also delete csm's index (~/.claude/csm/)
+./uninstall.sh --purge    # also delete csm's index (~/.local/share/csm/)
 ./uninstall.sh --help
 ```
 
-`--purge` removes only csm's own bookkeeping under `~/.claude/csm/`. It **never**
-touches claude's session transcripts in `~/.claude/projects/`, so your
-conversations are safe either way. Use the same `CSM_BINDIR` override if you
-installed to a custom location:
+`--purge` removes only csm's own bookkeeping under `~/.local/share/csm/` (and
+any leftover `~/.claude/csm/` from before it was moved). It **never** touches
+claude's session transcripts in `~/.claude/projects/`, so your conversations
+are safe either way. Use the same `CSM_BINDIR` override if you installed to a
+custom location:
 
 ```sh
 CSM_BINDIR=/usr/local/bin ./uninstall.sh

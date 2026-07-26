@@ -2,7 +2,7 @@
 # Remove the csm binary from your PATH (the mirror of install.sh).
 #
 #   ./uninstall.sh            Remove the installed csm symlink/binary
-#   ./uninstall.sh --purge    Also delete csm's index (~/.claude/csm/index.redb)
+#   ./uninstall.sh --purge    Also delete csm's index (~/.local/share/csm/index.redb)
 #
 # Note: --purge only removes csm's own bookkeeping. It never touches claude's
 # session transcripts under ~/.claude/projects/.
@@ -45,13 +45,20 @@ else
 fi
 
 if $purge; then
-  cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/csm"
-  if [ -d "$cfg" ]; then
-    rm -rf "$cfg"
-    echo "==> Purged csm data: $cfg"
-  else
-    echo "==> No csm data to purge at $cfg"
+  data="${XDG_DATA_HOME:-$HOME/.local/share}/csm"
+  legacy="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/csm"
+  purged=false
+  if [ -d "$data" ]; then
+    rm -rf "$data"
+    echo "==> Purged csm data: $data"
+    purged=true
   fi
+  if [ -d "$legacy" ]; then
+    rm -rf "$legacy"
+    echo "==> Purged legacy csm data: $legacy"
+    purged=true
+  fi
+  $purged || echo "==> No csm data to purge"
 fi
 
 if $removed; then

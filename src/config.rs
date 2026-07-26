@@ -19,8 +19,28 @@ pub fn projects_root() -> PathBuf {
     config_dir().join("projects")
 }
 
+/// Base directory for csm's own data. Deliberately NOT under `~/.claude`:
+/// that tree belongs to claude, and csm has no say over its layout — a
+/// future claude version could restructure or clear it out from under us.
+/// Honors `XDG_DATA_HOME`, falling back to `~/.local/share`.
+pub fn data_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("XDG_DATA_HOME") {
+        return PathBuf::from(dir).join("csm");
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".local").join("share").join("csm")
+}
+
 /// csm's own index database (the only state csm owns).
 pub fn index_path() -> PathBuf {
+    data_dir().join("index.redb")
+}
+
+/// Where the index used to live, before it was moved out of claude's config
+/// tree. Only consulted for one-time migration.
+pub fn legacy_index_path() -> PathBuf {
     config_dir().join("csm").join("index.redb")
 }
 
